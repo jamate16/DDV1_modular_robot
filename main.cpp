@@ -754,6 +754,70 @@ public:
 
 DifferentialRobot DDV1 = DifferentialRobot(31.4, 117);
 
+class Comms {
+public: // Member variables
+    struct MessageIncoming {
+        enum InstructionType {
+            STANDBY,
+            ROBOT_ROTATE,
+            ROBOT_MOVE,
+            THIRDDOF_ROTATE
+        };
+        InstructionType type;
+        double x_or_angle;
+        double y;
+    } inc_msg;
+
+    struct MessageOutgoing {
+        // Add members to this struct as needed
+    } out_msg;
+
+private: // Member variables
+    RF24 radio;
+    RF24Network network;
+
+    uint16_t module_this;
+    uint16_t module_mission_control;
+
+public: // Methods
+    Comms(spi_inst_t* hw_id, uint8_t CE_PIN, uint8_t CSN_PIN, uint8_t SCK_PIN, uint8_t TX_PIN, uint8_t RX_PIN, uint16_t _module_this, uint16_t _module_mission_control)
+        : inc_msg {.type=MessageIncoming::STANDBY,
+                   .x_or_angle=0.0,
+                   .y=0.0},
+          radio {RF24(CE_PIN, CSN_PIN)},
+          network {RF24Network(radio)},
+          module_this {_module_this},
+          module_mission_control {_module_mission_control} {
+    
+        // Wait until comms have been set up, this could be improved with a timeout counter in order to run the robot with out comms
+        while(!set_up(hw_id, CE_PIN, CSN_PIN, SCK_PIN, TX_PIN, RX_PIN)) {
+            ;
+        }
+    }
+
+private: // Methods
+    bool set_up(spi_inst_t* hw_id, uint8_t CE_PIN, uint8_t CSN_PIN, uint8_t SCK_PIN, uint8_t TX_PIN, uint8_t RX_PIN) {
+        // Set up spi
+        spi.begin(spi0, SCK_PIN, TX_PIN, RX_PIN);
+
+        // Set up NRF24 radio
+        if (!radio.begin(&spi, CE_PIN, CSN_PIN)) {
+            printf("radio hardware is not responding!!\n");
+            return false;
+        }
+        radio.setChannel(90);
+        radio.setPALevel(RF24_PA_LOW); // RF24_PA_MAX is default.
+
+        // Set up NRF24 network
+        network.begin(module_this);
+
+        printf("RF24Network/examples_pico/helloworld_rx\n"); // print example's introductory prompt
+        return true;
+    }
+};
+
+Comms comms(spi0, 4, 1, 2, 3, 0, 1, 0);
+
 // Funtion handler for timer(low_level) callbacks
 bool low_level_sampling(struct repeating_timer *t) {
     // Calculate change in time
