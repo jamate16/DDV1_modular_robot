@@ -277,7 +277,7 @@ public:
         c_speeds_wheels[0] = (1/2.0)*((1/A)*c_speeds[0] - (1/B)*c_speeds[1]); // Left wheel
         c_speeds_wheels[1] = -(1/2.0)*((1/A)*c_speeds[0] + (1/B)*c_speeds[1]); // Right wheel
 
-        printf("%f %f %f %f %f %f %f %f %f %d %d %f %f %d\n", pv[0], pv[1], pv[2]*180/M_PI, e_th_PC, e_th_OC, c_speeds[0], c_speeds[1]*180/M_PI, c_speeds_wheels[0], c_speeds_wheels[1], conditions.at_des_pos, conditions.at_des_orie, e_des_posi, e_des_orie*180/M_PI, curr_state);
+        // printf("%f %f %f %f %f %f %f %f %f %d %d %f %f %d\n", pv[0], pv[1], pv[2]*180/M_PI, e_th_PC, e_th_OC, c_speeds[0], c_speeds[1]*180/M_PI, c_speeds_wheels[0], c_speeds_wheels[1], conditions.at_des_pos, conditions.at_des_orie, e_des_posi, e_des_orie*180/M_PI, curr_state);
     }
 
     void pos_controller_calculate_control(float e_th, float e_l){
@@ -757,15 +757,19 @@ DifferentialRobot DDV1 = DifferentialRobot(31.4, 117);
 class Comms {
 public: // Member variables
     struct MessageIncoming {
-        enum InstructionType {
+        enum InstructionType : uint8_t {
             STANDBY,
             ROBOT_ROTATE,
             ROBOT_MOVE,
             THIRDDOF_ROTATE
         };
         InstructionType type;
-        double x_or_angle;
-        double y;
+        uint8_t x_or_angle;
+        uint8_t y;
+
+        void print_msg() {
+            printf("%d %d %d\n", type, x_or_angle, y);
+        }
     } inc_msg;
 
     struct MessageOutgoing {
@@ -779,28 +783,49 @@ private: // Member variables
     uint16_t module_this;
     uint16_t module_mission_control;
 
+    spi_inst_t* hw_id;
+    uint8_t CE_PIN;
+    uint8_t CSN_PIN;
+    uint8_t SCK_PIN;
+    uint8_t TX_PIN;
+    uint8_t RX_PIN;
+
 public: // Methods
-    Comms(spi_inst_t* hw_id, uint8_t CE_PIN, uint8_t CSN_PIN, uint8_t SCK_PIN, uint8_t TX_PIN, uint8_t RX_PIN, uint16_t _module_this, uint16_t _module_mission_control)
-        : inc_msg {.type=MessageIncoming::STANDBY,
-                   .x_or_angle=0.0,
-                   .y=0.0},
+    Comms(spi_inst_t* _hw_id, uint8_t _CE_PIN, uint8_t _CSN_PIN, uint8_t _SCK_PIN, uint8_t _TX_PIN, uint8_t _RX_PIN, uint16_t _module_this, uint16_t _module_mission_control)
+        : hw_id {_hw_id}, CE_PIN {_CE_PIN}, CSN_PIN {_CSN_PIN}, SCK_PIN {_SCK_PIN}, TX_PIN {_TX_PIN}, RX_PIN {_RX_PIN},
+          inc_msg {.type=MessageIncoming::STANDBY,
+                   .x_or_angle=0,
+                   .y=0},
           radio {RF24(CE_PIN, CSN_PIN)},
           network {RF24Network(radio)},
           module_this {_module_this},
           module_mission_control {_module_mission_control} {
-    
-        // Wait until comms have been set up, this could be improved with a timeout counter in order to run the robot with out comms
-        while(!set_up(hw_id, CE_PIN, CSN_PIN, SCK_PIN, TX_PIN, RX_PIN)) {
-            ;
-        }
+
+        // Set up of the radio and network can't be here, it has to be in main, after everything else has been set up
     }
 
-private: // Methods
-    bool set_up(spi_inst_t* hw_id, uint8_t CE_PIN, uint8_t CSN_PIN, uint8_t SCK_PIN, uint8_t TX_PIN, uint8_t RX_PIN) {
+    // Helper function, bc network is a private variable and it's better that it stays that way
+    void update_network() {
+        network.update();
+    }
+
+    MessageIncoming read_msg_if_any() {
+        if (!network.available()){
+            change_inc_msg_status_to_standby();
+        } else {
+            RF24NetworkHeader header;
+            network.read(header, &inc_msg, sizeof(inc_msg));
+        }
+
+        printf("%d\n", sizeof(inc_msg));
+        return inc_msg;
+    }
+
+    bool set_up() {
         // Set up spi
         spi.begin(spi0, SCK_PIN, TX_PIN, RX_PIN);
 
-        // Set up NRF24 radio
+        // Set up NRF24 radios
         if (!radio.begin(&spi, CE_PIN, CSN_PIN)) {
             printf("radio hardware is not responding!!\n");
             return false;
@@ -814,9 +839,16 @@ private: // Methods
         printf("RF24Network/examples_pico/helloworld_rx\n"); // print example's introductory prompt
         return true;
     }
+
+private: // Methods
+
+    // Once the data from inc_msg has been dealt with, the status should be changed to standby
+    inline void change_inc_msg_status_to_standby() {
+        inc_msg.type = MessageIncoming::STANDBY;
+    }
 };
 
-Comms comms(spi0, 4, 1, 2, 3, 0, 1, 0);
+Comms comms(spi0, 4, 1, 2, 3, 0, 1, 0); // The prompts are never seen on the terminal, bc uart is started inside of main()
 
 // Funtion handler for timer(low_level) callbacks
 bool low_level_sampling(struct repeating_timer *t) {
@@ -913,6 +945,11 @@ int main(){
     stdio_init_all(); // Starts usb or uart (this is decided in the CMakeLists.txt file)
     int delay {5000};
 
+    // Wait until comms have been set up, this could be improved with a timeout counter in order to run the robot with out comms
+    while(!comms.set_up()) {
+        ;
+    }
+
     // Motor control loop setup
     struct repeating_timer timer1;
     add_repeating_timer_ms(-Ts, low_level_sampling, NULL, &timer1);
@@ -923,18 +960,33 @@ int main(){
     add_repeating_timer_ms(Ts_h, high_level_sampling, NULL, &timer2);
     busy_wait_ms(500);
 
-    busy_wait_ms(5000); // Some time to be able to connect to pc
+    // busy_wait_ms(5000); // Some time to be able to connect to pc
 
-    test_pose_controller(100, 0, 0);
-    busy_wait_ms(10000);
+    // test_pose_controller(100, 0, 0);
+    // busy_wait_ms(10000);
 
-    test_pose_controller(0, 0, 90);
-    busy_wait_ms(10000);
+    // test_pose_controller(0, 0, 90);
+    // busy_wait_ms(10000);
 
-    test_pose_controller(0, 100, 0);
-    busy_wait_ms(10000);
+    // test_pose_controller(0, 100, 0);
+    // busy_wait_ms(10000);
 
-    while(true){    
-        tight_loop_contents();
+    while(true){
+        // Update status of NRF24 network
+
+        uint64_t last_time_ {to_us_since_boot(get_absolute_time())};
+        
+        comms.update_network();
+        static Comms::MessageIncoming msg;
+        msg = comms.read_msg_if_any();
+        if (msg.type != Comms::MessageIncoming::STANDBY) {
+            msg.print_msg();
+        }
+
+        uint64_t current_time {to_us_since_boot(get_absolute_time())}; // Variable that avoids calling to_us_since_boot(get_absolute_time()) twice
+        uint64_t delta_time {current_time - last_time_}; // [us]
+
+        // printf("%ld alive\n", delta_time);
+        busy_wait_ms(1000);
     }
 }
