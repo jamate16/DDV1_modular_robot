@@ -264,6 +264,7 @@ public:
         // This errors' purpose is to be printed
         float e_th_PC = atan2(sp[1]-pv[1], sp[0]-pv[0]) - pv[2];
         float e_th_OC = sp[2] - pv[2];
+        float e_l = sqrt(pow(sp[0]-pv[0], 2)+pow(sp[1]-pv[1], 2));
 
         // To visualize each motor speed
 
@@ -277,13 +278,13 @@ public:
         c_speeds_wheels[0] = (1/2.0)*((1/A)*c_speeds[0] - (1/B)*c_speeds[1]); // Left wheel
         c_speeds_wheels[1] = -(1/2.0)*((1/A)*c_speeds[0] + (1/B)*c_speeds[1]); // Right wheel
 
-        // printf("%f %f %f %f %f %f %f %f %f %d %d %f %f %d\n", pv[0], pv[1], pv[2]*180/M_PI, e_th_PC, e_th_OC, c_speeds[0], c_speeds[1]*180/M_PI, c_speeds_wheels[0], c_speeds_wheels[1], conditions.at_des_pos, conditions.at_des_orie, e_des_posi, e_des_orie*180/M_PI, curr_state);
+        printf("%f %f %f %f %f %f %f %f %f %f %d %d %f %f %d\n", pv[0], pv[1], pv[2]*180/M_PI, e_l, e_th_PC, e_th_OC, c_speeds[0], c_speeds[1]*180/M_PI, c_speeds_wheels[0], c_speeds_wheels[1], conditions.at_des_pos, conditions.at_des_orie, e_des_posi, e_des_orie*180/M_PI, curr_state);
     }
 
     void pos_controller_calculate_control(float e_th, float e_l){
         // Control laws
-        control_signals.v = 0.7*e_l; // This value has to be normalized, bc there are setpoints close to current position and others that aren't.
-        control_signals.w = kpPC*e_th; // + kdPC*e_th_dot;
+        control_signals.v = kpPC*e_l; // This value has to be normalized, bc there are setpoints close to current position and others that aren't.
+        control_signals.w = 0.08*e_l*e_th; // + kdPC*e_th_dot;
     }
 
     void orient_controller_calculate_control(float e_th){
@@ -631,11 +632,11 @@ private:
         // Enable gpios as inputs and enable pullup resistors
         gpio_init(pin00deg);
         gpio_set_dir(pin00deg, GPIO_IN);
-        gpio_pull_up(pin00deg);
+        gpio_pull_down(pin00deg);
 
         gpio_init(pin90deg);
         gpio_set_dir(pin90deg, GPIO_IN);
-        gpio_pull_up(pin90deg);
+        gpio_pull_down(pin90deg);
 
         // Only one _with_callback, bc every gpio interruption is handled by the same callback
         gpio_set_irq_enabled_with_callback(pin00deg, GPIO_IRQ_EDGE_FALL, true, &gpio_callback);
@@ -674,7 +675,7 @@ public:
 
     DifferentialRobot(float _wheel_D, float _wheel_distance)
         : wheel_D{_wheel_D/1000}, wheel_distance{_wheel_distance/1000} {
-        P_controller = P_PositionOrientation_Controller(0.5, 0.8, 1, 0, 20, 1, 1*M_PI/180);
+        P_controller = P_PositionOrientation_Controller(0.6, 0.8, 1, 0, 20, 1, 1.5*M_PI/180);
     }
 
     void calculate_position_velocity(int64_t delta_time, int64_t delta_enc_counts[2]){
@@ -752,7 +753,7 @@ public:
     }
 };
 
-DifferentialRobot DDV1 = DifferentialRobot(31.4, 117);
+DifferentialRobot DDV1 = DifferentialRobot(33, 129.5);
 
 class Comms {
 public: // Member variables
@@ -764,8 +765,8 @@ public: // Member variables
             THIRDDOF_ROTATE
         };
         InstructionType type;
-        uint8_t x_or_angle;
-        uint8_t y;
+        int8_t x_or_angle;
+        int8_t y;
 
         void print_msg() {
             printf("%d %d %d\n", type, x_or_angle, y);
@@ -809,15 +810,16 @@ public: // Methods
         network.update();
     }
 
-    MessageIncoming read_msg_if_any() {
+    MessageIncoming read_and_execute_msg_if_any() {
         if (!network.available()){
             change_inc_msg_status_to_standby();
         } else {
             RF24NetworkHeader header;
             network.read(header, &inc_msg, sizeof(inc_msg));
+            printf("%d\n", sizeof(inc_msg));
+            inc_msg.print_msg();
+            run_inc_msg_command(inc_msg);
         }
-
-        printf("%d\n", sizeof(inc_msg));
         return inc_msg;
     }
 
@@ -846,6 +848,35 @@ private: // Methods
     inline void change_inc_msg_status_to_standby() {
         inc_msg.type = MessageIncoming::STANDBY;
     }
+
+    void run_inc_msg_command(Comms::MessageIncoming &msg) {
+        float pose[3];
+        switch (msg.type) {
+            case Comms::MessageIncoming::STANDBY:
+                pose[0] = 0.0;
+                pose[1] = 0.0;
+                pose[2] = 0.0;
+                break;
+            case Comms::MessageIncoming::ROBOT_ROTATE:
+                pose[0] = 0.0;
+                pose[1] = 0.0;
+                pose[2] = (float)(msg.x_or_angle*M_PI/180); // Angle has to be in radians
+                break;
+            case Comms::MessageIncoming::ROBOT_MOVE:
+                pose[0] = msg.x_or_angle;
+                pose[1] = msg.y;
+                pose[2] = 0.0;  
+                break;
+            case Comms::MessageIncoming::THIRDDOF_ROTATE:
+                // MotorTwoPositions::set_position only accepts 0 or 1, but for human interaction purpose a 90 is passed from PC, so it is turned into a 1.
+                if (msg.x_or_angle == 90) {
+                    msg.x_or_angle = 1;
+                }
+                third_dof.set_position(msg.x_or_angle);
+                return;
+        }
+        DDV1.set_pose(pose);
+    }
 };
 
 Comms comms(spi0, 4, 1, 2, 3, 0, 1, 0); // The prompts are never seen on the terminal, bc uart is started inside of main()
@@ -863,7 +894,7 @@ bool low_level_sampling(struct repeating_timer *t) {
         motor.calculate_speed(delta_time);
         motor.calculate_control();
     }
-    third_dof.calculate_control();
+    third_dof.calculate_control(65);
 
     // printf("%d %d %d %d\n", third_dof.get_at00deg(), third_dof.get_at90deg(), third_dof.get_goto00deg(), third_dof.get_goto90deg());
     // printf("%lf %lf %lf %lf %lf %lf %f %ld\n", motors[1].speed_f[0], motors[1].get_speed(), motors[1].get_dc(), motors[0].speed_f[0], motors[0].get_speed(), motors[0].get_dc(), battery.get_voltage(), delta_time);
@@ -973,20 +1004,10 @@ int main(){
 
     while(true){
         // Update status of NRF24 network
-
-        uint64_t last_time_ {to_us_since_boot(get_absolute_time())};
-        
         comms.update_network();
         static Comms::MessageIncoming msg;
-        msg = comms.read_msg_if_any();
-        if (msg.type != Comms::MessageIncoming::STANDBY) {
-            msg.print_msg();
-        }
+        msg = comms.read_and_execute_msg_if_any();
 
-        uint64_t current_time {to_us_since_boot(get_absolute_time())}; // Variable that avoids calling to_us_since_boot(get_absolute_time()) twice
-        uint64_t delta_time {current_time - last_time_}; // [us]
-
-        // printf("%ld alive\n", delta_time);
-        busy_wait_ms(1000);
+        busy_wait_ms(500);
     }
 }
